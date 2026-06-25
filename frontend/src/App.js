@@ -1,54 +1,55 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import "@/App.css";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
 import axios from "axios";
-import { HOME } from "@/constants/testIds";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
 const API = `${BACKEND_URL}/api`;
 
-const Home = () => {
-  const helloWorldApi = async () => {
-    try {
-      const response = await axios.get(`${API}/`);
-      console.log(response.data.message);
-    } catch (e) {
-      console.error(e, `errored out requesting / api`);
-    }
-  };
+function App() {
+  const [status, setStatus] = useState("checking");
+  const [message, setMessage] = useState("");
 
   useEffect(() => {
-    helloWorldApi();
+    axios
+      .get(`${API}/`)
+      .then((response) => {
+        setStatus("connected");
+        setMessage(response.data.message);
+      })
+      .catch(() => {
+        setStatus("disconnected");
+        setMessage(`Could not reach backend at ${BACKEND_URL}`);
+      });
   }, []);
 
   return (
-    <div>
-      <header className="App-header">
-        <a
-          data-testid={HOME.emergentLink}
-          className="App-link"
-          href="https://emergent.sh"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <img src="https://avatars.githubusercontent.com/in/1201222?s=120&u=2686cf91179bbafbc7a71bfbc43004cf9ae1acea&v=4" />
-        </a>
-        <p className="mt-5">Building something incredible ~!</p>
-      </header>
-    </div>
-  );
-};
-
-function App() {
-  return (
     <div className="App">
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Home />}>
-            <Route index element={<Home />} />
-          </Route>
-        </Routes>
-      </BrowserRouter>
+      <header className="App-header">
+        <h1>🍌 Banana Ripeness Classifier</h1>
+        <p
+          style={{
+            color:
+              status === "connected"
+                ? "#4C9A2A"
+                : status === "disconnected"
+                  ? "#C07A1E"
+                  : "#888",
+          }}
+        >
+          Backend:{" "}
+          {status === "checking"
+            ? "Checking connection…"
+            : status === "connected"
+              ? `Connected — ${message}`
+              : message}
+        </p>
+        <p style={{ marginTop: "1.5rem", fontSize: "0.95rem" }}>
+          Open the classifier app at{" "}
+          <a href="http://localhost:8501" style={{ color: "#E29400" }}>
+            http://localhost:8501
+          </a>
+        </p>
+      </header>
     </div>
   );
 }

@@ -1,18 +1,26 @@
 """Banana Ripeness Classifier - Streamlit app.
 
-Snapshot camera + image upload modes powered by a MobileNetV2 transfer-learning
-model. Clean light theme, mobile friendly.
+Live camera (streamlit-webrtc + YOLOv8n) and image upload powered by a
+two-stage pipeline: banana detection → MobileNetV2 ripeness classification.
 """
 
 import pickle
-import numpy as np
-import pandas as pd
+import os
+
 import altair as alt
+import av
+import pandas as pd
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
+from streamlit_webrtc import RTCConfiguration, VideoProcessorBase, WebRtcMode, webrtc_streamer
 
-from classifier import BananaRipenessClassifier, CLASSES, ASSETS_DIR
-import os
+from classifier import CLASSES, ASSETS_DIR
+from pipeline import (
+    TwoStagePipeline,
+    apply_overlay,
+    draw_bbox_on_pil,
+    draw_no_banana_pil,
+)
 
 # --------------------------------------------------------------------------- #
 # Config & constants
@@ -24,8 +32,12 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-CONF_THRESHOLD = 0.40       # below -> "No banana detected"
-UNCERTAIN_THRESHOLD = 0.75  # below -> show uncertainty warning + top 2
+YOLO_CONF = 0.40
+UNCERTAIN_THRESHOLD = 0.75
+
+RTC_CONFIGURATION = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
 
 COLORS = {
     "unripe": "#4C9A2A",
@@ -58,14 +70,15 @@ GUIDE = {
 }
 
 FONT_PATH = "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"
+PROCESS_EVERY_N_FRAMES = 3
 
 
 # --------------------------------------------------------------------------- #
 # Cached resources
 # --------------------------------------------------------------------------- #
-@st.cache_resource(show_spinner="Loading model…")
-def get_classifier():
-    return BananaRipenessClassifier()
+@st.cache_resource(show_spinner="Loading YOLO + ripeness models…")
+def load_pipeline() -> TwoStagePipeline:
+    return TwoStagePipeline(yolo_conf=YOLO_CONF)
 
 
 @st.cache_data
@@ -73,6 +86,41 @@ def get_history():
     path = os.path.join(ASSETS_DIR, "training_history.pkl")
     with open(path, "rb") as f:
         return pickle.load(f)
+
+
+# --------------------------------------------------------------------------- #
+# WebRTC video processor
+# --------------------------------------------------------------------------- #
+class BananaVideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self._pipeline    = load_pipeline()
+        self.last_result  = None
+        self._last_frame  = None
+        self._frame_i     = 0
+        self._lock        = __import__("threading").Lock()
+
+    def recv(self, frame):
+        bgr = frame.to_ndarray(format="bgr24")
+        self._frame_i += 1
+
+        if self._frame_i % PROCESS_EVERY_N_FRAMES == 0:
+            annotated, result = apply_overlay(
+                bgr,
+                self._pipeline.detector,
+                self._pipeline.classifier,
+                COLORS,
+            )
+            with self._lock:
+                self._last_frame = annotated
+                self.last_result = result
+        else:
+            with self._lock:
+                annotated = self._last_frame
+
+        if annotated is None:
+            annotated = bgr
+
+        return av.VideoFrame.from_ndarray(annotated, format="bgr24")
 
 
 # --------------------------------------------------------------------------- #
@@ -86,18 +134,11 @@ def inject_css():
         <style>
             html, body, [class*="css"], .stApp { font-family: 'Manrope', sans-serif; }
             h1, h2, h3, .hero-title { font-family: 'Fraunces', serif !important; letter-spacing: -0.01em; }
-
             .block-container { padding-top: 2.2rem; padding-bottom: 4rem; max-width: 1180px; }
-
-            /* Hero */
             .hero {
                 background: linear-gradient(135deg, #FFF7DC 0%, #FDEFC0 55%, #FBE3A0 100%);
-                border: 1px solid #F2DfA0;
-                border-radius: 26px;
-                padding: 38px 40px;
+                border: 1px solid #F2DfA0; border-radius: 26px; padding: 38px 40px;
                 box-shadow: 0 18px 40px -24px rgba(180, 140, 20, 0.55);
-                position: relative;
-                overflow: hidden;
             }
             .hero-title { font-size: clamp(2rem, 4.5vw, 3.2rem); font-weight: 700; color: #1F1B12; margin: 4px 0 6px; line-height: 1.05; }
             .hero-sub { font-size: 1.02rem; color: #6B5F3E; max-width: 640px; font-weight: 500; }
@@ -106,8 +147,6 @@ def inject_css():
                 background: #1F1B12; color: #FFD23F; font-weight: 700; font-size: .8rem;
                 padding: 7px 14px; border-radius: 999px; letter-spacing: .04em; text-transform: uppercase;
             }
-
-            /* Stat cards */
             .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 18px; }
             .stat {
                 background: #FFFFFF; border: 1px solid #EFE7D2; border-radius: 18px; padding: 18px 20px;
@@ -115,8 +154,6 @@ def inject_css():
             }
             .stat .v { font-family: 'Fraunces', serif; font-size: 1.7rem; font-weight: 700; color: #1F1B12; }
             .stat .l { font-size: .8rem; color: #8A7C58; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; margin-top: 2px; }
-
-            /* Result cards */
             .result-card {
                 border-radius: 20px; padding: 24px 26px; color: #fff;
                 box-shadow: 0 16px 34px -20px rgba(0,0,0,.45);
@@ -125,14 +162,11 @@ def inject_css():
             .result-card .cls { font-family: 'Fraunces', serif; font-size: 2.4rem; font-weight: 700; line-height: 1; margin: 6px 0 4px; }
             .result-card .conf { font-size: 1.05rem; font-weight: 600; opacity: .95; }
             .result-card .tag { display:inline-block; margin-top: 12px; background: rgba(255,255,255,.22); padding: 6px 12px; border-radius: 999px; font-weight: 700; font-size: .85rem; }
-
             .nobanana {
                 background: #FBEFEF; border: 1.5px dashed #D98A8A; color: #9A3B3B;
                 border-radius: 20px; padding: 28px; text-align: center;
             }
             .nobanana .big { font-family: 'Fraunces', serif; font-size: 1.9rem; font-weight: 700; }
-
-            /* Guide cards */
             .guide-card {
                 background:#fff; border:1px solid #EFE7D2; border-left: 6px solid var(--c);
                 border-radius: 16px; padding: 18px 20px; height: 100%;
@@ -141,20 +175,20 @@ def inject_css():
             .guide-card .gt { font-family:'Fraunces',serif; font-size:1.25rem; font-weight:700; color:#1F1B12; }
             .guide-card .gtag { font-size:.78rem; font-weight:700; color: var(--c); text-transform:uppercase; letter-spacing:.05em; }
             .guide-card .gd { font-size:.92rem; color:#6B5F3E; margin-top:8px; font-weight:500; line-height:1.5; }
-
             .top2-card {
                 background:#fff; border:1px solid #EFE7D2; border-top: 5px solid var(--c);
                 border-radius:14px; padding:16px 18px; text-align:center;
             }
             .top2-card .n { font-family:'Fraunces',serif; font-size:1.3rem; font-weight:700; color:#1F1B12; }
             .top2-card .p { font-size:1.4rem; font-weight:800; color:var(--c); }
-
             .section-h { font-family:'Fraunces',serif; font-size:1.7rem; font-weight:700; color:#1F1B12; margin: 6px 0 2px; }
             .section-sub { color:#8A7C58; font-weight:500; margin-bottom: 14px; }
-
+            .pipeline-badge {
+                display:inline-block; background:#FFF7DC; border:1px solid #F2DfA0;
+                border-radius:10px; padding:6px 12px; font-size:.82rem; font-weight:600; color:#6B5F3E; margin-bottom:12px;
+            }
             .stTabs [data-baseweb="tab-list"] { gap: 6px; }
             .stTabs [data-baseweb="tab"] { font-weight:700; font-size:.98rem; padding: 8px 16px; border-radius: 12px 12px 0 0; }
-
             @media (max-width: 760px) {
                 .stat-grid { grid-template-columns: repeat(2, 1fr); }
                 .hero { padding: 26px 22px; }
@@ -166,36 +200,6 @@ def inject_css():
 
 
 # --------------------------------------------------------------------------- #
-# Image overlay
-# --------------------------------------------------------------------------- #
-def _hex_to_rgb(h):
-    h = h.lstrip("#")
-    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
-
-
-def annotate_image(pil_img: Image.Image, text: str, color_hex: str) -> Image.Image:
-    img = pil_img.convert("RGB").copy()
-    W, H = img.size
-    draw = ImageDraw.Draw(img, "RGBA")
-
-    fsize = max(18, int(W * 0.052))
-    try:
-        font = ImageFont.truetype(FONT_PATH, fsize)
-    except Exception:
-        font = ImageFont.load_default()
-
-    pad = int(fsize * 0.5)
-    bbox = draw.textbbox((0, 0), text, font=font)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    bar_h = th + pad * 2
-
-    rgb = _hex_to_rgb(color_hex)
-    draw.rectangle([0, H - bar_h, W, H], fill=(rgb[0], rgb[1], rgb[2], 235))
-    draw.text(((W - tw) / 2, H - bar_h + pad - bbox[1]), text, font=font, fill=(255, 255, 255, 255))
-    return img
-
-
-# --------------------------------------------------------------------------- #
 # Charts
 # --------------------------------------------------------------------------- #
 def confidence_chart(probs: dict):
@@ -204,7 +208,6 @@ def confidence_chart(probs: dict):
         [{"Class": c.capitalize(), "key": c, "Probability": probs[c]} for c in CLASSES]
     )
     df["pct"] = (df["Probability"] * 100).round(1).astype(str) + "%"
-
     base = alt.Chart(df)
     bars = base.mark_bar(cornerRadiusTopRight=7, cornerRadiusBottomRight=7, height=30).encode(
         x=alt.X("Probability:Q", scale=alt.Scale(domain=[0, 1]),
@@ -227,14 +230,13 @@ def history_chart(values_train, values_val, title, fmt):
         "Value": list(values_train) + list(values_val),
         "Set": ["Training"] * n + ["Validation"] * n,
     })
-    line = alt.Chart(df).mark_line(point=True, strokeWidth=3).encode(
+    return alt.Chart(df).mark_line(point=True, strokeWidth=3).encode(
         x=alt.X("Epoch:Q", axis=alt.Axis(tickMinStep=1, title="Epoch")),
         y=alt.Y("Value:Q", axis=alt.Axis(format=fmt, title=None)),
         color=alt.Color("Set:N", scale=alt.Scale(domain=["Training", "Validation"], range=["#E29400", "#4C9A2A"]),
                         legend=alt.Legend(orient="top", title=None)),
         tooltip=["Epoch", alt.Tooltip("Value:Q", format=".3f"), "Set"],
     ).properties(height=280, title=title).configure_view(strokeOpacity=0)
-    return line
 
 
 # --------------------------------------------------------------------------- #
@@ -246,8 +248,8 @@ def render_header():
         <div class="hero">
             <span class="hero-badge">● 98.22% test accuracy</span>
             <div class="hero-title">Banana Ripeness Classifier</div>
-            <div class="hero-sub">Snap or upload a photo of a banana and an AI model trained on thousands of images
-            tells you whether it's unripe, ripe, overripe or rotten — with a live confidence breakdown.</div>
+            <div class="hero-sub">Point your camera at a banana — YOLOv8n finds it, then a MobileNetV2 model
+            trained on 13,000+ images classifies ripeness in real time with a live confidence breakdown.</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -265,76 +267,91 @@ def render_header():
     )
 
 
-def render_result(image: Image.Image, res: dict):
+def render_uncertainty_warning(res: dict):
+    if not res.get("uncertain"):
+        return
+    conf = res["top_conf"]
+    c1, c2 = res["ordered"][0], res["ordered"][1]
+    st.warning(
+        f"⚠️ **Uncertain** — top confidence is {conf*100:.1f}% (below 75%). "
+        f"Could be **{GUIDE[c1[0]]['title']}** or **{GUIDE[c2[0]]['title']}**:"
+    )
+    cc1, cc2 = st.columns(2)
+    for col, (cls, p) in zip((cc1, cc2), (c1, c2)):
+        with col:
+            st.markdown(
+                f"""
+                <div class="top2-card" style="--c:{COLORS[cls]};">
+                    <div class="n">{GUIDE[cls]['title']}</div>
+                    <div class="p">{p*100:.1f}%</div>
+                    <div style="color:#8A7C58;font-size:.85rem;font-weight:600;margin-top:4px;">{GUIDE[cls]['tag']}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def render_ripeness_panel(res: dict, show_chart: bool = True):
     top = res["top_class"]
     conf = res["top_conf"]
-
-    col_img, col_info = st.columns([1, 1], gap="large")
-
-    with col_img:
-        if res["no_banana"]:
-            annotated = annotate_image(image, "No banana detected", "#9A3B3B")
-        else:
-            annotated = annotate_image(image, f"{GUIDE[top]['title']}  {conf*100:.1f}%", COLORS[top])
-        st.image(annotated, use_container_width=True)
-
-    with col_info:
-        if res["no_banana"]:
-            reason = ("Top confidence below 40%" if conf < CONF_THRESHOLD
-                      else "Image doesn't look like a banana")
-            st.markdown(
-                f"""
-                <div class="nobanana">
-                    <div class="big">🚫 No banana detected</div>
-                    <div style="margin-top:8px;font-weight:600;">{reason}. Try a clearer, well-lit photo of a single banana.</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f"""
-                <div class="result-card" style="background:{COLORS[top]};">
-                    <div class="label">Prediction</div>
-                    <div class="cls">{GUIDE[top]['title']}</div>
-                    <div class="conf">{conf*100:.1f}% confidence</div>
-                    <div class="tag">{GUIDE[top]['tag']}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                f"<div style='margin-top:14px;color:#6B5F3E;font-weight:500;'>{GUIDE[top]['desc']}</div>",
-                unsafe_allow_html=True,
-            )
-
-    # Uncertainty handling
-    if res["uncertain"]:
-        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-        st.warning(
-            f"⚠️ **Uncertain result** — top confidence is {conf*100:.1f}% (below 75%). "
-            "Overripe and rotten bananas look similar, so here are the two most likely classes:"
+    st.markdown(
+        f"""
+        <div class="result-card" style="background:{COLORS[top]};">
+            <div class="label">Prediction</div>
+            <div class="cls">{GUIDE[top]['title']}</div>
+            <div class="conf">{conf*100:.1f}% confidence</div>
+            <div class="tag">{GUIDE[top]['tag']}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div style='margin-top:14px;color:#6B5F3E;font-weight:500;'>{GUIDE[top]['desc']}</div>",
+        unsafe_allow_html=True,
+    )
+    render_uncertainty_warning(res)
+    if show_chart:
+        st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='section-sub' style='font-weight:700;color:#1F1B12;'>Confidence across all classes</div>",
+            unsafe_allow_html=True,
         )
-        (c1, c2) = res["ordered"][0], res["ordered"][1]
-        cc1, cc2 = st.columns(2)
-        for col, (cls, p) in zip((cc1, cc2), (c1, c2)):
-            with col:
-                st.markdown(
-                    f"""
-                    <div class="top2-card" style="--c:{COLORS[cls]};">
-                        <div class="n">{GUIDE[cls]['title']}</div>
-                        <div class="p">{p*100:.1f}%</div>
-                        <div style="color:#8A7C58;font-size:.85rem;font-weight:600;margin-top:4px;">{GUIDE[cls]['tag']}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+        st.altair_chart(confidence_chart(res["probs"]), width="stretch")
 
-    # Confidence bar chart (always shown)
-    st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
-    st.markdown("<div class='section-sub' style='font-weight:700;color:#1F1B12;'>Confidence across all classes</div>",
-                unsafe_allow_html=True)
-    st.altair_chart(confidence_chart(res["probs"]), use_container_width=True)
+
+def render_no_banana_panel():
+    st.markdown(
+        """
+        <div class="nobanana">
+            <div class="big">🚫 No banana detected</div>
+            <div style="margin-top:8px;font-weight:600;">
+                YOLOv8n found no banana with ≥40% confidence. Point the camera at a clear, well-lit banana.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_upload_result(image: Image.Image, pipeline_result: dict):
+    if not pipeline_result["banana_detected"]:
+        annotated = draw_no_banana_pil(image)
+        col_img, col_info = st.columns([1, 1], gap="large")
+        with col_img:
+            st.image(annotated, width="stretch")
+        with col_info:
+            render_no_banana_panel()
+        return
+
+    det = pipeline_result["detection"]
+    res = pipeline_result["ripeness"]
+    annotated = draw_bbox_on_pil(image, det, res, COLORS)
+    col_img, col_info = st.columns([1, 1], gap="large")
+    with col_img:
+        st.image(annotated, width="stretch")
+    with col_info:
+        st.caption(f"YOLO detection: {det['conf']*100:.1f}% confidence")
+        render_ripeness_panel(res)
 
 
 def render_guide():
@@ -358,28 +375,77 @@ def render_guide():
 
 def render_history():
     st.markdown("<div class='section-h'>Training history</div>", unsafe_allow_html=True)
-    st.markdown("<div class='section-sub'>Accuracy and loss over training epochs (training vs. validation).</div>",
-                unsafe_allow_html=True)
+    st.markdown(
+        "<div class='section-sub'>Accuracy and loss over training epochs (training vs. validation).</div>",
+        unsafe_allow_html=True,
+    )
     try:
         h = get_history()
     except Exception as e:
         st.error(f"Could not load training history: {e}")
         return
 
-    final_acc = h["accuracy"][-1] * 100
-    final_val = h["val_accuracy"][-1] * 100
     m1, m2, m3 = st.columns(3)
     m1.metric("Epochs trained", len(h["accuracy"]))
-    m2.metric("Final train accuracy", f"{final_acc:.2f}%")
-    m3.metric("Final val accuracy", f"{final_val:.2f}%")
+    m2.metric("Final train accuracy", f"{h['accuracy'][-1]*100:.2f}%")
+    m3.metric("Final val accuracy", f"{h['val_accuracy'][-1]*100:.2f}%")
 
     c1, c2 = st.columns(2, gap="large")
     with c1:
-        st.altair_chart(history_chart(h["accuracy"], h["val_accuracy"], "Accuracy", "%"),
-                        use_container_width=True)
+        st.altair_chart(history_chart(h["accuracy"], h["val_accuracy"], "Accuracy", "%"), width="stretch")
     with c2:
-        st.altair_chart(history_chart(h["loss"], h["val_loss"], "Loss", ".2f"),
-                        use_container_width=True)
+        st.altair_chart(history_chart(h["loss"], h["val_loss"], "Loss", ".2f"), width="stretch")
+
+
+@st.fragment(run_every=1.0)
+def render_live_feed_stats(webrtc_ctx):
+    """Refresh probability chart + warnings while the live feed is running."""
+    if not webrtc_ctx.state.playing:
+        return
+    processor = webrtc_ctx.video_processor
+    if processor is None or processor.last_result is None:
+        st.caption("Waiting for first detection…")
+        return
+
+    result = processor.last_result
+    if not result["banana_detected"]:
+        st.info("No banana in frame — point camera at banana, ensure the object is still, directly in front of camera.")
+        return
+
+    res = result["ripeness"]
+    det = result["detection"]
+    st.caption(f"YOLO banana detection: {det['conf']*100:.1f}% confidence")
+    render_ripeness_panel(res, show_chart=True)
+
+
+def render_camera_tab():
+    st.markdown("<div class='section-h'>Live camera</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='section-sub'>Real-time two-stage pipeline: "
+        "YOLOv8n detects the banana, then MobileNetV2 classifies ripeness.</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="pipeline-badge">Stage 1: YOLOv8n (COCO class 46) &nbsp;→&nbsp; '
+        "Stage 2: MobileNetV2 ripeness</div>",
+        unsafe_allow_html=True,
+    )
+
+    load_pipeline()  # preload models before WebRTC starts
+
+    webrtc_ctx = webrtc_streamer(
+        key="banana-live",
+        mode=WebRtcMode.SENDRECV,
+        rtc_configuration=RTC_CONFIGURATION,
+        media_stream_constraints={"video": True, "audio": False},
+        video_processor_factory=BananaVideoProcessor,
+        async_processing=True,
+    )
+
+    if webrtc_ctx.state.playing:
+        render_live_feed_stats(webrtc_ctx)
+    else:
+        st.info("▶️ Press **Start** above to open the live camera feed.")
 
 
 # --------------------------------------------------------------------------- #
@@ -390,36 +456,26 @@ def main():
     render_header()
     st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
 
-    clf = get_classifier()
-
     tab_cam, tab_up, tab_guide, tab_hist = st.tabs(
-        ["📷  Camera", "🖼️  Upload", "📖  Ripeness guide", "📈  Training history"]
+        ["📷  Live camera", "🖼️  Upload", "📖  Ripeness guide", "📈  Training history"]
     )
 
     with tab_cam:
-        st.markdown("<div class='section-h'>Camera mode</div>", unsafe_allow_html=True)
-        st.markdown("<div class='section-sub'>Take a snapshot of a banana — the result is overlaid on the photo.</div>",
-                    unsafe_allow_html=True)
-        shot = st.camera_input("Point at a banana and capture", key="cam", label_visibility="collapsed")
-        if shot is not None:
-            img = Image.open(shot)
-            with st.spinner("Analyzing…"):
-                res = clf.predict(img, CONF_THRESHOLD, UNCERTAIN_THRESHOLD)
-            render_result(img, res)
-        else:
-            st.info("📸 Allow camera access and capture a photo to classify.")
+        render_camera_tab()
 
     with tab_up:
         st.markdown("<div class='section-h'>Upload mode</div>", unsafe_allow_html=True)
-        st.markdown("<div class='section-sub'>Upload a JPG or PNG image of a banana.</div>",
-                    unsafe_allow_html=True)
+        st.markdown(
+            "<div class='section-sub'>Upload a photo — YOLOv8n finds the banana, then ripeness is classified.</div>",
+            unsafe_allow_html=True,
+        )
         up = st.file_uploader("Upload image", type=["jpg", "jpeg", "png", "webp"],
                               key="up", label_visibility="collapsed")
         if up is not None:
             img = Image.open(up)
             with st.spinner("Analyzing…"):
-                res = clf.predict(img, CONF_THRESHOLD, UNCERTAIN_THRESHOLD)
-            render_result(img, res)
+                result = load_pipeline().process_pil(img)
+            render_upload_result(img, result)
         else:
             st.info("⬆️ Drag & drop or browse to upload a banana photo.")
 
@@ -431,7 +487,7 @@ def main():
 
     st.markdown(
         "<div style='text-align:center;color:#A89A72;font-size:.82rem;margin-top:42px;'>"
-        "Built with Streamlit • MobileNetV2 transfer learning • 4-class banana ripeness model</div>",
+        "YOLOv8n + MobileNetV2 • 4-class banana ripeness • streamlit-webrtc</div>",
         unsafe_allow_html=True,
     )
 
