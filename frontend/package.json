@@ -61,7 +61,8 @@
     "zod": "3.24.4"
   },
   "scripts": {
-    "start": "craco start",
+    "start": "/root/.venv/bin/streamlit run /app/streamlit_app/app.py --server.port 3000 --server.address 0.0.0.0 --server.headless true --server.enableCORS false --server.enableXsrfProtection false --server.fileWatcherType none --browser.gatherUsageStats false",
+    "start:cra": "craco start",
     "build": "craco build",
     "test": "craco test"
   },
