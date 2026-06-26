@@ -1,15 +1,15 @@
+python3 -c "
+content = '''[server]
+maxUploadSize = 50
+
 [theme]
-base = "light"
-primaryColor = "#E29400"
-backgroundColor = "#FCFBF6"
-secondaryBackgroundColor = "#FFFFFF"
-textColor = "#2A271F"
-font = "sans serif"
-
-[server]
-headless = true
-enableCORS = false
-enableXsrfProtection = false
-
-[browser]
-gatherUsageStats = false
+base = \"light\"
+primaryColor = \"#F2B705\"
+backgroundColor = \"#FFFFFF\"
+secondaryBackgroundColor = \"#FFF7DC\"
+textColor = \"#1F1B12\"
+'''
+with open('streamlit_app/.streamlit/config.toml', 'w') as f:
+    f.write(content)
+print('Written successfully')
+"
