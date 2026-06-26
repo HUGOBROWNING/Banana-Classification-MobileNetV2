@@ -183,7 +183,9 @@ class TwoStagePipeline:
         y1 = max(0, det["y1"])
         x2 = min(w, det["x2"])
         y2 = min(h, det["y2"])
+        
         if x2 <= x1 or y2 <= y1:
+            
             return pil_img
         return pil_img.crop((x1, y1, x2, y2))
 
