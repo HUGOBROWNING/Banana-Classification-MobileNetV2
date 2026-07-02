@@ -1,5 +1,7 @@
 # Banana Ripeness Classifier
 
+App can be accessed here: https://banana-classification-mobilenetv2dv.streamlit.app
+
 A two-stage computer vision pipeline that classifies banana ripeness in real 
 time using a live camera feed. Built end-to-end: data collection via web 
 scraping, model training in Google Colab, and deployment as an interactive 
