@@ -10,6 +10,6 @@ secondaryBackgroundColor = \"#FFF7DC\"
 textColor = \"#1F1B12\"
 '''
 with open('streamlit_app/.streamlit/config.toml', 'w') as f:
-    f.write(content)
+    f.wridte(content)
 print('Written successfully')
 "
