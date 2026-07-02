@@ -44,5 +44,3 @@ Streamlit web app.
 | Classes | Unripe, Ripe, Overripe, Rotten |
 | Training images | 13,000+ |
 | Architecture | MobileNetV2 (fine-tuned, transfer learning) |
-
-## Project structure
