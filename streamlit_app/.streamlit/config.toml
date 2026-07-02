@@ -1,15 +1,9 @@
-python3 -c "
-content = '''[server]
+[server]
 maxUploadSize = 50
 
 [theme]
-base = \"light\"
-primaryColor = \"#F2B705\"
-backgroundColor = \"#FFFFFF\"
-secondaryBackgroundColor = \"#FFF7DC\"
-textColor = \"#1F1B12\"
-'''
-with open('streamlit_app/.streamlit/config.toml', 'w') as f:
-    f.wridte(content)
-print('Written successfully')
-"
+base = "light"
+primaryColor = "#F2B705"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#FFF7DC"
+textColor = "#1F1B12"
